@@ -40,3 +40,9 @@ The script runs as plain Python, so it works both:
 
 - in Codex/dev container environments
 - on your own machine (outside Codex) as long as Python 3 is installed
+
+If your environment cannot access `robots.txt` (proxy/network issue), the crawler now fails open on robots fetch errors and records robots status in the report `project` section. You can also explicitly bypass robots checks (only with permission):
+
+```bash
+python3 seo_crawler.py https://yourdomain.com --ignore-robots --output yourdomain_report.json
+```

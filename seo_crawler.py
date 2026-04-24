@@ -126,16 +126,26 @@ def fetch(url: str, user_agent: str, timeout: int) -> Tuple[Optional[int], Dict[
         return None, {}, b"", str(exc)
 
 
-def load_robots(base_url: str, user_agent: str, timeout: int) -> robotparser.RobotFileParser:
+def load_robots(base_url: str, user_agent: str, timeout: int) -> Tuple[robotparser.RobotFileParser, str]:
     robots_url = parse.urljoin(base_url, "/robots.txt")
     rp = robotparser.RobotFileParser()
     rp.set_url(robots_url)
     try:
-        rp.read()
+        req = request.Request(robots_url, headers={"User-Agent": user_agent})
+        with request.urlopen(req, timeout=timeout) as resp:
+            content = resp.read().decode("utf-8", errors="ignore")
+            rp.parse(content.splitlines())
+            return rp, "ok"
+    except error.HTTPError as exc:
+        if exc.code in (401, 403):
+            # Explicitly blocked by robots endpoint or server policy.
+            rp.disallow_all = True
+            return rp, "forbidden"
+        # robots unreachable/non-200: fail-open
+        return rp, "unavailable"
     except Exception:
-        # Fail-open for robots fetch errors; still return parser object.
-        pass
-    return rp
+        # robots unreachable due networking/proxy errors: fail-open
+        return rp, "unavailable"
 
 
 def detect_issues(pages: Dict[str, PageRecord]) -> List[Issue]:
@@ -189,10 +199,16 @@ def detect_issues(pages: Dict[str, PageRecord]) -> List[Issue]:
     return issues
 
 
-def crawl(start_url: str, max_urls: int, user_agent: str, timeout: int) -> Dict[str, object]:
+def crawl(
+    start_url: str,
+    max_urls: int,
+    user_agent: str,
+    timeout: int,
+    ignore_robots: bool = False,
+) -> Dict[str, object]:
     start_url = normalize_url(start_url, "/") if parse.urlsplit(start_url).path == "" else normalize_url(start_url, "")
     domain = parse.urlsplit(start_url).netloc
-    rp = load_robots(start_url, user_agent, timeout)
+    rp, robots_status = load_robots(start_url, user_agent, timeout)
 
     queue: deque[str] = deque([start_url])
     visited: Set[str] = set()
@@ -205,7 +221,8 @@ def crawl(start_url: str, max_urls: int, user_agent: str, timeout: int) -> Dict[
             continue
         visited.add(url)
 
-        if not rp.can_fetch(user_agent, url):
+        robots_blocked = robots_status == "ok" and not rp.can_fetch(user_agent, url)
+        if not ignore_robots and robots_blocked:
             pages[url] = PageRecord(
                 url=url,
                 status_code=None,
@@ -285,7 +302,13 @@ def crawl(start_url: str, max_urls: int, user_agent: str, timeout: int) -> Dict[
     }
 
     return {
-        "project": {"start_url": start_url, "domain": domain, "max_urls": max_urls},
+        "project": {
+            "start_url": start_url,
+            "domain": domain,
+            "max_urls": max_urls,
+            "robots_status": robots_status,
+            "ignore_robots": ignore_robots,
+        },
         "summary": summary,
         "pages": [asdict(p) for p in pages.values()],
         "issues": [asdict(i) for i in issues],
@@ -331,6 +354,11 @@ def main() -> None:
     parser.add_argument("--user-agent", default="seo-auditor-bot/0.1", help="Crawler user-agent")
     parser.add_argument("--output", default="seo_report.json", help="Output JSON path")
     parser.add_argument(
+        "--ignore-robots",
+        action="store_true",
+        help="Ignore robots.txt disallow rules (use only when you have permission)",
+    )
+    parser.add_argument(
         "--feasibility-only",
         action="store_true",
         help="Print feasibility estimate for --max-urls and exit",
@@ -347,6 +375,7 @@ def main() -> None:
         max_urls=max(1, args.max_urls),
         user_agent=args.user_agent,
         timeout=max(1, args.timeout),
+        ignore_robots=args.ignore_robots,
     )
 
     with open(args.output, "w", encoding="utf-8") as f:
