@@ -22,6 +22,9 @@ from urllib import error, parse, request, robotparser
 
 
 DEFAULT_TIMEOUT = 10
+DEFAULT_MAX_URLS = 20_000
+ASSUMED_AVG_FETCH_SECONDS = 0.6
+ASSUMED_AVG_PAGE_KB = 250
 
 
 @dataclass
@@ -289,14 +292,55 @@ def crawl(start_url: str, max_urls: int, user_agent: str, timeout: int) -> Dict[
     }
 
 
+def estimate_feasibility(max_urls: int) -> Dict[str, object]:
+    """Provide a rough feasibility estimate for crawl volume planning."""
+    est_seconds = max_urls * ASSUMED_AVG_FETCH_SECONDS
+    est_hours = round(est_seconds / 3600, 2)
+    est_transfer_gb = round((max_urls * ASSUMED_AVG_PAGE_KB) / (1024 * 1024), 2)
+    is_feasible_single_run = est_hours <= 24
+    recommendation = (
+        "Feasible for a single run on most developer machines."
+        if is_feasible_single_run
+        else "Likely long-running; consider splitting by sitemap/directory or lowering --max-urls."
+    )
+    return {
+        "max_urls": max_urls,
+        "assumptions": {
+            "avg_fetch_seconds_per_url": ASSUMED_AVG_FETCH_SECONDS,
+            "avg_page_kb": ASSUMED_AVG_PAGE_KB,
+        },
+        "estimate": {
+            "runtime_hours_single_worker": est_hours,
+            "network_transfer_gb": est_transfer_gb,
+        },
+        "feasible_single_run": is_feasible_single_run,
+        "recommendation": recommendation,
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run a technical SEO crawl and emit JSON report.")
     parser.add_argument("url", help="Start URL, e.g. https://example.com")
-    parser.add_argument("--max-urls", type=int, default=100, help="Max number of URLs to crawl")
+    parser.add_argument(
+        "--max-urls",
+        type=int,
+        default=DEFAULT_MAX_URLS,
+        help="Max number of URLs to crawl (default: 20,000)",
+    )
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT, help="Request timeout in seconds")
     parser.add_argument("--user-agent", default="seo-auditor-bot/0.1", help="Crawler user-agent")
     parser.add_argument("--output", default="seo_report.json", help="Output JSON path")
+    parser.add_argument(
+        "--feasibility-only",
+        action="store_true",
+        help="Print feasibility estimate for --max-urls and exit",
+    )
     args = parser.parse_args()
+
+    feasibility = estimate_feasibility(max(1, args.max_urls))
+    if args.feasibility_only:
+        print(json.dumps(feasibility, indent=2))
+        return
 
     report = crawl(
         start_url=args.url,
@@ -308,6 +352,8 @@ def main() -> None:
     with open(args.output, "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2)
 
+    print("Feasibility estimate:")
+    print(json.dumps(feasibility, indent=2))
     print(f"Crawl completed. Report written to {args.output}")
     print(json.dumps(report["summary"], indent=2))
 
